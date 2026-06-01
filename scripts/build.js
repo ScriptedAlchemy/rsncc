@@ -49,6 +49,8 @@ async function main() {
       minify,
       cache,
       v8cache,
+      // Keep the asset relocator package external to this wrapper loader so the
+      // runtime dependency remains installed and loaded directly from node_modules.
       externals: ["@vercel/webpack-asset-relocator-loader"]
     }
   );

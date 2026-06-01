@@ -269,9 +269,6 @@ importers:
       tiny-json-http:
         specifier: ^7.5.1
         version: 7.5.1
-      ts-loader:
-        specifier: ^9.5.7
-        version: 9.5.7(typescript@5.9.3)(webpack@5.94.0(@swc/core@1.15.40))
       tsconfig-paths:
         specifier: ^4.2.0
         version: 4.2.0
@@ -7542,13 +7539,6 @@ packages:
 
   ts-invariant@0.4.4:
     resolution: {integrity: sha512-uEtWkFM/sdZvRNNDL3Ehu4WVpwaulhwQszV8mrtcdeE8nN00BV9mAmQ88RkrBhFgl9gMgvjJLAQcZbnPXI9mlA==}
-
-  ts-loader@9.5.7:
-    resolution: {integrity: sha512-/ZNrKgA3K3PtpMYOC71EeMWIloGw3IYEa5/t1cyz2r5/PyUwTXGzYJvcD3kfUvmhlfpz1rhV8B2O6IVTQ0avsg==}
-    engines: {node: '>=12.0.0'}
-    peerDependencies:
-      typescript: '*'
-      webpack: ^5.0.0
 
   tsconfig-paths-webpack-plugin@4.2.0:
     resolution: {integrity: sha512-zbem3rfRS8BgeNK50Zz5SIQgXzLafiHjOwUAvk/38/o1jHn/V5QAgVUcz884or7WYcPaH3N2CIfUc2u0ul7UcA==}
@@ -16999,16 +16989,6 @@ snapshots:
   ts-invariant@0.4.4:
     dependencies:
       tslib: 1.14.1
-
-  ts-loader@9.5.7(typescript@5.9.3)(webpack@5.94.0(@swc/core@1.15.40)):
-    dependencies:
-      chalk: 4.1.2
-      enhanced-resolve: 5.21.4
-      micromatch: 4.0.8
-      semver: 7.8.0
-      source-map: 0.7.6
-      typescript: 5.9.3
-      webpack: 5.94.0(@swc/core@1.15.40)
 
   tsconfig-paths-webpack-plugin@4.2.0:
     dependencies:
