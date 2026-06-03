@@ -14,7 +14,7 @@ importers:
   .:
     dependencies:
       '@rspack/core':
-        specifier: ^1.7.5
+        specifier: ^1.7.11
         version: 1.7.11
       '@vercel/webpack-asset-relocator-loader':
         specifier: ^1.10.0
