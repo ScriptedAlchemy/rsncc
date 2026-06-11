@@ -79,7 +79,6 @@
     "mysql": "^2.16.0",
     "nan": "^2.27.0",
     "node-gyp": "^12.3.0",
-    "npm": "^6.13.4",
     "oracledb": "^6.1.0",
     "passport": "^0.6.0",
     "passport-google-oauth": "^2.0.0",
@@ -110,7 +109,7 @@
     "twilio": "^3.23.2",
     "typescript": "^5.2.2",
     "undici-types": "^7.21.0",
-    "vm2": "^3.10.3",
+    "vm2": "^3.11.5",
     "vue": "^2.5.17",
     "vue-server-renderer": "^2.5.17",
     "web-vitals": "^0.2.4",
@@ -121,5 +120,8 @@
   "dependencies": {
     "@rspack/core": "^1.7.11",
     "@vercel/webpack-asset-relocator-loader": "^1.10.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
