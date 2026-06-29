@@ -5,15 +5,14 @@ function ensureMainTemplate(compilation) {
   if (!compilation || compilation.mainTemplate) {
     return;
   }
-  const requireExtensions = {
-    taps: [],
-    tap(_name, fn) {
-      this.taps.push(fn);
-    }
-  };
   compilation.mainTemplate = {
     hooks: {
-      requireExtensions
+      requireExtensions: {
+        taps: [],
+        tap(_name, fn) {
+          this.taps.push(fn);
+        }
+      }
     }
   };
 }
