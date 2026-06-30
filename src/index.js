@@ -484,7 +484,10 @@ function ncc (
         }
       ],
       parser: {
-        javascript: { importMeta: false },
+        javascript: {
+          createRequire: false,
+          importMeta: false
+        },
       },
     },
     plugins
