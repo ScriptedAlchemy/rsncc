@@ -30,7 +30,7 @@ const defaultPermissions = 0o666;
 
 const relocateLoader = eval('require(__dirname + "/loaders/relocate-loader.js")');
 
-const esmAssetBase = "new URL('.', import.meta.url).pathname.slice(import.meta.url.match(/^file:\\/\\/\\/\\w:/) ? 1 : 0, -1)";
+const esmAssetBase = "decodeURIComponent(new URL('.', import.meta.url).pathname.slice(import.meta.url.match(/^file:\\/\\/\\/\\w:/) ? 1 : 0, -1))";
 const builtinModuleSet = new Set(builtinModules);
 
 function ensureAssetBaseAssignment(code, assetName, esm, outputAssetBase = '') {

@@ -25,6 +25,38 @@ function formatDiagnostics(typescript, diagnostics) {
     : null;
 }
 
+function getTypeCheckState(loaderContext, typescript, parsedOptions) {
+  const compilation = loaderContext._compilation;
+  if (!compilation || !compilation.hooks || !compilation.hooks.finishModules || !compilation.errors) {
+    return null;
+  }
+  const stateKey = JSON.stringify(parsedOptions);
+  if (!compilation.__nccTsLoaderState) {
+    compilation.__nccTsLoaderState = new Map();
+  }
+  if (compilation.__nccTsLoaderState.has(stateKey)) {
+    return compilation.__nccTsLoaderState.get(stateKey);
+  }
+  const state = {
+    files: new Set(),
+    reported: false
+  };
+  compilation.__nccTsLoaderState.set(stateKey, state);
+  compilation.hooks.finishModules.tap("ncc-ts-loader", () => {
+    if (state.reported || state.files.size === 0) {
+      return;
+    }
+    state.reported = true;
+    const host = typescript.createCompilerHost(parsedOptions);
+    const program = typescript.createProgram(Array.from(state.files), parsedOptions, host);
+    const diagnosticsText = formatDiagnostics(typescript, typescript.getPreEmitDiagnostics(program));
+    if (diagnosticsText) {
+      compilation.errors.push(new Error(diagnosticsText));
+    }
+  });
+  return state;
+}
+
 module.exports = function tsTranspileLoader(input, inputSourceMap) {
   if (this.cacheable) this.cacheable();
   const callback = this.async();
@@ -53,34 +85,26 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
   let outputText;
   let sourceMapText;
   let diagnostics = [];
+  const typeCheckState = options.transpileOnly
+    ? null
+    : getTypeCheckState(this, typescript, parsedOptions);
 
-  if (options.transpileOnly) {
-    const result = typescript.transpileModule(input.toString(), {
-      fileName,
-      compilerOptions: parsedOptions,
-      reportDiagnostics: false
-    });
-    outputText = result.outputText;
-    sourceMapText = result.sourceMapText;
-    diagnostics = result.diagnostics || [];
-  } else {
+  if (typeCheckState) {
+    typeCheckState.files.add(fileName);
+  }
+  const result = typescript.transpileModule(input.toString(), {
+    fileName,
+    compilerOptions: parsedOptions,
+    reportDiagnostics: !typeCheckState && !options.transpileOnly
+  });
+  outputText = result.outputText;
+  sourceMapText = result.sourceMapText;
+  diagnostics = result.diagnostics || [];
+
+  if (!options.transpileOnly && !typeCheckState) {
     const host = typescript.createCompilerHost(parsedOptions);
-    host.writeFile = (writtenFileName, content) => {
-      if (writtenFileName.endsWith('.map')) {
-        sourceMapText = content;
-        return;
-      }
-      if (writtenFileName.endsWith('.d.ts')) {
-        return;
-      }
-      outputText = content;
-    };
     const program = typescript.createProgram([fileName], parsedOptions, host);
-    diagnostics = typescript.getPreEmitDiagnostics(program);
-    const emitResult = program.emit();
-    if (emitResult && emitResult.diagnostics) {
-      diagnostics = diagnostics.concat(emitResult.diagnostics);
-    }
+    diagnostics = diagnostics.concat(typescript.getPreEmitDiagnostics(program));
   }
 
   const diagnosticsText = formatDiagnostics(typescript, diagnostics);
