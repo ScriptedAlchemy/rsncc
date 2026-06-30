@@ -427,10 +427,7 @@ function ncc (
     node: false,
     externals ({ context, request, dependencyType }, callback) {
       const external = externalMap.get(request);
-      if (external) {
-        const useModuleExternal = esm && dependencyType === 'esm';
-        return callback(null, `${useModuleExternal ? 'module' : 'node-commonjs'} ${external}`);
-      }
+      if (external) return callback(null, `${dependencyType === 'esm' && esm ? 'module' : 'node-commonjs'} ${external}`);
       return callback();
     },
     module: {
