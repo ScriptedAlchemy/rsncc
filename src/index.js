@@ -34,9 +34,6 @@ const esmAssetBase = "decodeURIComponent(new URL('.', import.meta.url).pathname.
 const builtinModuleSet = new Set(builtinModules);
 
 function ensureAssetBaseAssignment(code, assetName, esm, outputAssetBase = '') {
-  if (code.includes('__webpack_require__.ab')) {
-    return code;
-  }
   const assetBase = outputAssetBase
     ? outputAssetBase.endsWith('/') || outputAssetBase.endsWith('\\')
       ? outputAssetBase
@@ -47,7 +44,13 @@ function ensureAssetBaseAssignment(code, assetName, esm, outputAssetBase = '') {
   const relBase = relBaseValue && relBaseValue !== '.' ? `/${relBaseValue}` : '';
   const baseSuffix = `${relBase}/${assetBase}`;
   const runtimeBase = esm ? esmAssetBase : '__dirname';
-  const injection = `if (typeof __webpack_require__ !== 'undefined') __webpack_require__.ab = ${runtimeBase} + ${JSON.stringify(baseSuffix)};`;
+  const webpackRequire = '__webpack_require__';
+  const assetBaseProperty = 'ab';
+  const injection = `if (typeof ${webpackRequire} !== 'undefined') ${webpackRequire}.${assetBaseProperty} = ${runtimeBase} + ${JSON.stringify(baseSuffix)};`;
+  const existingAssignment = /if \(typeof __webpack_require__ !== 'undefined'\) __webpack_require__\.ab = [^;]+;/;
+  if (existingAssignment.test(code)) {
+    return code.replace(existingAssignment, injection);
+  }
   const exportIndex = code.indexOf('var __webpack_exports__');
   if (exportIndex !== -1) {
     return code.slice(0, exportIndex) + injection + code.slice(exportIndex);
