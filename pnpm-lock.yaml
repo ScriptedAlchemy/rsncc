@@ -272,9 +272,6 @@ importers:
       typescript:
         specifier: ^5.2.2
         version: 5.9.3
-      undici-types:
-        specifier: ^7.21.0
-        version: 7.24.6
       vm2:
         specifier: ^3.11.5
         version: 3.11.5

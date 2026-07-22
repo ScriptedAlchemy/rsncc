@@ -246,6 +246,9 @@ function ncc (
             };
             resolver.resolve(contextInfo, context, request, resolveContext, done);
           };
+          // Rspack does not currently expose a JS hook for recovering after a
+          // failed normal-module resolution (see web-infra-dev/rspack#14640),
+          // so ncc preserves runtime notfound semantics by probing here.
           normalModuleFactory.hooks.beforeResolve.tapAsync("ncc", (resolveData, callback) => {
             if (!resolveData || !resolveData.request) return callback();
             const request = resolveData.request;
