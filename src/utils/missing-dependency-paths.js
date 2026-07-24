@@ -22,6 +22,7 @@ const isDirectory = (path, cache) => {
 // deeper. Registering the full path instead would make rspack watch the closest
 // existing ancestor, which can be far enough up the tree to be recursive.
 const firstMissingSegment = (path, cache) => {
+  if (isDirectory(path, cache)) return null;
   let current = path;
   let parent = dirname(current);
   while (parent !== current) {
@@ -44,6 +45,25 @@ const lookupDirectories = context => {
   }
 };
 
+const findPackageScope = context => {
+  const packageJsonCandidates = [];
+  for (const directory of lookupDirectories(context)) {
+    const packageJson = join(directory, "package.json");
+    packageJsonCandidates.push(packageJson);
+    try {
+      if (fs.statSync(packageJson).isFile()) {
+        return {
+          directory,
+          packageJson,
+          packageJsonCandidates,
+          data: JSON.parse(fs.readFileSync(packageJson, "utf8"))
+        };
+      }
+    } catch (e) {}
+  }
+  return { packageJsonCandidates };
+};
+
 const moduleCandidates = (base, extensions) => {
   const candidates = [base, join(base, "package.json")];
   for (const extension of extensions)
@@ -57,6 +77,119 @@ const fileCandidates = (base, extensions) => {
   return candidates;
 };
 
+const findMappings = (mapping, key) => {
+  if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+    return key === "." ? [{ value: mapping, wildcard: "" }] : [];
+  }
+  if (Object.prototype.hasOwnProperty.call(mapping, key)) {
+    return [{ value: mapping[key], wildcard: "" }];
+  }
+  const matches = [];
+  for (const pattern of Object.keys(mapping)) {
+    const star = pattern.indexOf("*");
+    if (star === -1) continue;
+    const prefix = pattern.slice(0, star);
+    const suffix = pattern.slice(star + 1);
+    if (!key.startsWith(prefix) || !key.endsWith(suffix)) continue;
+    matches.push({
+      value: mapping[pattern],
+      wildcard: key.slice(prefix.length, key.length - suffix.length)
+    });
+  }
+  if (matches.length) return matches;
+  const isConditionalMap = !Object.keys(mapping).some(name =>
+    name.startsWith(".") || name.startsWith("#")
+  );
+  return key === "." && isConditionalMap
+    ? [{ value: mapping, wildcard: "" }]
+    : [];
+};
+
+const bareTargetCandidates = (
+  request,
+  context,
+  extensions,
+  mainFields,
+  seen = new Set()
+) => {
+  const seenKey = `bare\0${context}\0${request}`;
+  if (seen.has(seenKey)) return [];
+  seen.add(seenKey);
+  const match = packageRequest.exec(request);
+  if (!match) return [];
+  const [, name, subpath] = match;
+  const candidates = [];
+  for (const directory of lookupDirectories(context)) {
+    const packageDirectory = join(directory, "node_modules", name);
+    const packageJson = join(packageDirectory, "package.json");
+    candidates.push(...(subpath
+      ? [packageJson, ...fileCandidates(join(packageDirectory, subpath), extensions)]
+      : moduleCandidates(packageDirectory, extensions)));
+    try {
+      const data = JSON.parse(fs.readFileSync(packageJson, "utf8"));
+      candidates.push(
+        ...mappedTargetCandidates(
+          data.exports,
+          subpath ? `.${subpath}` : ".",
+          packageDirectory,
+          extensions,
+          mainFields,
+          seen
+        )
+      );
+      if (!subpath) {
+        for (const field of mainFields) {
+          if (typeof data[field] === "string") {
+            candidates.push(
+              ...fileCandidates(pathResolve(packageDirectory, data[field]), extensions)
+            );
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  return candidates;
+};
+
+const mappedTargetCandidates = (
+  mapping,
+  key,
+  packageDirectory,
+  extensions,
+  mainFields,
+  seen = new Set()
+) => {
+  const seenKey = `mapping\0${packageDirectory}\0${key}`;
+  if (seen.has(seenKey)) return [];
+  seen.add(seenKey);
+  const matches = findMappings(mapping, key);
+  const targets = [];
+  const addTargets = (value, wildcard) => {
+    if (typeof value === "string") {
+      const target = value.replace(/\*/g, wildcard);
+      if (target.startsWith("./")) {
+        targets.push(...fileCandidates(pathResolve(packageDirectory, target), extensions));
+      } else if (!target.startsWith("#") && !schemeRequest.test(target)) {
+        targets.push(
+          ...bareTargetCandidates(
+            target,
+            packageDirectory,
+            extensions,
+            mainFields,
+            seen
+          )
+        );
+      }
+    } else if (Array.isArray(value)) {
+      value.forEach(item => addTargets(item, wildcard));
+    } else if (value && typeof value === "object") {
+      Object.values(value).forEach(item => addTargets(item, wildcard));
+    }
+  };
+  matches.forEach(match => addTargets(match.value, match.wildcard));
+  return targets;
+};
+
 // Rspack resolves in Rust and only reports the paths a resolver touched when the
 // request resolves, so a miss arrives with no dependency information at all
 // (see web-infra-dev/rspack#14640). ncc turns misses into runtime errors instead
@@ -66,19 +199,31 @@ module.exports = function missingDependencyPaths(
   request,
   context,
   extensions,
-  cache = new Map()
+  cache = new Map(),
+  mainFields = ["main"]
 ) {
-  const requestPath = request.split(/[?#]/, 1)[0];
+  const requestPath = request.startsWith("#")
+    ? request.split("?", 1)[0]
+    : request.split(/[?#]/, 1)[0];
   if (!requestPath) return [];
 
   let candidates;
   if (requestPath.startsWith(".") || isAbsolute(requestPath)) {
     candidates = fileCandidates(pathResolve(context, requestPath), extensions);
   } else if (requestPath.startsWith("#")) {
-    // An imports field resolves against the closest package.json.
-    candidates = lookupDirectories(context).map(directory =>
-      join(directory, "package.json")
-    );
+    const scope = findPackageScope(context);
+    candidates = scope.packageJson
+      ? [
+          scope.packageJson,
+          ...mappedTargetCandidates(
+            scope.data && scope.data.imports,
+            requestPath,
+            scope.directory,
+            extensions,
+            mainFields
+          )
+        ]
+      : scope.packageJsonCandidates;
   } else if (schemeRequest.test(requestPath)) {
     return [];
   } else {
@@ -88,11 +233,32 @@ module.exports = function missingDependencyPaths(
     candidates = [];
     for (const directory of lookupDirectories(context)) {
       const packageDirectory = join(directory, "node_modules", name);
-      candidates.push(
-        ...(subpath
-          ? fileCandidates(join(packageDirectory, subpath), extensions)
-          : moduleCandidates(packageDirectory, extensions))
-      );
+      const packageJson = join(packageDirectory, "package.json");
+      candidates.push(...(subpath
+        ? [packageJson, ...fileCandidates(join(packageDirectory, subpath), extensions)]
+        : moduleCandidates(packageDirectory, extensions)));
+      try {
+        const data = JSON.parse(fs.readFileSync(packageJson, "utf8"));
+        const exportsKey = subpath ? `.${subpath}` : ".";
+        candidates.push(
+          ...mappedTargetCandidates(
+            data.exports,
+            exportsKey,
+            packageDirectory,
+            extensions,
+            mainFields
+          )
+        );
+        if (!subpath) {
+          for (const field of mainFields) {
+            if (typeof data[field] === "string") {
+              candidates.push(
+                ...fileCandidates(pathResolve(packageDirectory, data[field]), extensions)
+              );
+            }
+          }
+        }
+      } catch (e) {}
     }
   }
 

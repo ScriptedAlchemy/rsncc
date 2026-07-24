@@ -25,6 +25,30 @@ function formatDiagnostics(typescript, diagnostics) {
     : null;
 }
 
+function dedupeDiagnostics(compilation, typescript, diagnostics) {
+  if (!compilation || !diagnostics || diagnostics.length === 0) return diagnostics;
+  if (!compilation.__nccTsLoaderDiagnostics) {
+    compilation.__nccTsLoaderDiagnostics = new Set();
+  }
+  return diagnostics.filter(diagnostic => {
+    const message = typescript.flattenDiagnosticMessageText
+      ? typescript.flattenDiagnosticMessageText(diagnostic.messageText, "\n")
+      : String(diagnostic.messageText);
+    const fileName = diagnostic.file ? diagnostic.file.fileName : "";
+    const key = [
+      diagnostic.code,
+      diagnostic.category,
+      fileName,
+      diagnostic.start,
+      diagnostic.length,
+      message
+    ].join("\0");
+    if (compilation.__nccTsLoaderDiagnostics.has(key)) return false;
+    compilation.__nccTsLoaderDiagnostics.add(key);
+    return true;
+  });
+}
+
 function getTypeCheckState(loaderContext, typescript, parsedOptions) {
   const compilation = loaderContext._compilation;
   if (!compilation || !compilation.hooks || !compilation.hooks.finishModules || !compilation.errors) {
@@ -39,6 +63,9 @@ function getTypeCheckState(loaderContext, typescript, parsedOptions) {
   }
   const state = {
     files: new Set(),
+    emitAsset: typeof compilation.emitAsset === "function"
+      ? compilation.emitAsset.bind(compilation)
+      : null,
     reported: false
   };
   compilation.__nccTsLoaderState.set(stateKey, state);
@@ -49,7 +76,39 @@ function getTypeCheckState(loaderContext, typescript, parsedOptions) {
     state.reported = true;
     const host = typescript.createCompilerHost(parsedOptions);
     const program = typescript.createProgram(Array.from(state.files), parsedOptions, host);
-    const diagnosticsText = formatDiagnostics(typescript, typescript.getPreEmitDiagnostics(program));
+    let diagnostics = typescript.getPreEmitDiagnostics(program);
+    if (
+      state.emitAsset &&
+      !parsedOptions.noEmit &&
+      (parsedOptions.declaration || parsedOptions.composite)
+    ) {
+      const outputDirectory = parsedOptions.declarationDir || parsedOptions.outDir;
+      const emitResult = program.emit(
+        undefined,
+        (outputPath, content) => {
+          if (!/\.d\.(?:ts|mts|cts)(?:\.map)?$/.test(outputPath)) return;
+          let assetName = outputDirectory
+            ? path.relative(outputDirectory, outputPath)
+            : path.basename(outputPath);
+          if (assetName.startsWith("..") || path.isAbsolute(assetName)) {
+            assetName = path.basename(outputPath);
+          }
+          state.emitAsset(assetName.split(path.sep).join("/"), {
+            source: () => content,
+            size: () => Buffer.byteLength(content)
+          });
+        },
+        undefined,
+        true
+      );
+      diagnostics = diagnostics.concat(emitResult.diagnostics || []);
+    }
+    diagnostics = dedupeDiagnostics(
+      compilation,
+      typescript,
+      diagnostics
+    );
+    const diagnosticsText = formatDiagnostics(typescript, diagnostics);
     if (diagnosticsText) {
       compilation.errors.push(new Error(diagnosticsText));
     }
@@ -79,13 +138,9 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
     ? typescript.convertCompilerOptionsFromJson(compilerOptions, configFileDirectory)
     : { options: compilerOptions, errors: [] };
   const parsedOptions = parsedConfig.options || compilerOptions;
-  const configDiagnosticsText = formatDiagnostics(typescript, parsedConfig.errors || []);
-  if (configDiagnosticsText) {
-    this.emitError(new Error(configDiagnosticsText));
-  }
   let outputText;
   let sourceMapText;
-  let diagnostics = [];
+  let diagnostics = parsedConfig.errors || [];
   const typeCheckState = options.transpileOnly
     ? null
     : getTypeCheckState(this, typescript, parsedOptions);
@@ -96,11 +151,11 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
   const result = typescript.transpileModule(input.toString(), {
     fileName,
     compilerOptions: parsedOptions,
-    reportDiagnostics: !typeCheckState && !options.transpileOnly
+    reportDiagnostics: !typeCheckState
   });
   outputText = result.outputText;
   sourceMapText = result.sourceMapText;
-  diagnostics = result.diagnostics || [];
+  diagnostics = diagnostics.concat(result.diagnostics || []);
 
   if (!options.transpileOnly && !typeCheckState) {
     const host = typescript.createCompilerHost(parsedOptions);
@@ -108,6 +163,7 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
     diagnostics = diagnostics.concat(typescript.getPreEmitDiagnostics(program));
   }
 
+  diagnostics = dedupeDiagnostics(this._compilation, typescript, diagnostics);
   const diagnosticsText = formatDiagnostics(typescript, diagnostics);
   if (diagnosticsText) {
     this.emitError(new Error(diagnosticsText));

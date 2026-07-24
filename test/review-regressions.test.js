@@ -124,6 +124,17 @@ describe("review regressions", () => {
     expect(result.trim()).toBe("require-ok");
   });
 
+  it("reports TypeScript syntax errors in transpile-only mode", async () => {
+    const input = path.join(tmpDir, "entry.ts");
+    fs.writeFileSync(input, "const value: = 1;\n");
+
+    await expect(ncc(input, {
+      cache: false,
+      quiet: true,
+      transpileOnly: true
+    })).rejects.toThrow(/TS1110/);
+  });
+
   it("tries URL resolution options for bare relative assets", async () => {
     const input = path.join(tmpDir, "entry.mjs");
     fs.writeFileSync(input, "export default new URL('asset.txt', import.meta.url);\n");
@@ -148,12 +159,64 @@ describe("review regressions", () => {
     const bare = missingDependencyPaths("future-pkg/deep/file.js", context, [".js"]);
     expect(bare).toContain(path.join(context, "node_modules"));
 
+    const packageDir = path.join(tmpDir, "node_modules", "existing-package");
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+      name: "existing-package",
+      exports: {
+        "./future": "./generated/future.js"
+      }
+    }));
+    expect(missingDependencyPaths("existing-package/future", context, [".js"])).toContain(
+      path.join(packageDir, "package.json")
+    );
+    expect(missingDependencyPaths("existing-package/future", context, [".js"])).toContain(
+      path.join(packageDir, "generated")
+    );
+
     // Registering a path under a directory that does not exist yet would make
     // rspack watch a far ancestor recursively, so every path stops one segment
     // past the deepest directory that exists.
     for (const candidate of [...relative, ...bare])
       expect(fs.existsSync(path.dirname(candidate))).toBe(true);
 
+    fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({
+      imports: {
+        "#future": "./generated/future.js",
+        "#external": "optional-dependency",
+        "#external-missing": "not-installed",
+        "#a*/very-long": "./short-prefix/*",
+        "#abcdef*": "./long-prefix/*"
+      }
+    }));
+    expect(missingDependencyPaths("#future", context, [".js"])).toContain(
+      path.join(tmpDir, "package.json")
+    );
+    expect(missingDependencyPaths("#future", context, [".js"])).toContain(
+      path.join(tmpDir, "generated")
+    );
+    const externalPackageDir = path.join(
+      tmpDir,
+      "node_modules",
+      "optional-dependency"
+    );
+    fs.mkdirSync(externalPackageDir);
+    fs.writeFileSync(path.join(externalPackageDir, "package.json"), JSON.stringify({
+      exports: "./generated/value.js"
+    }));
+    expect(missingDependencyPaths("#external", context, [".js"])).toContain(
+      path.join(externalPackageDir, "generated")
+    );
+    expect(missingDependencyPaths("#external-missing", context, [".js"])).toContain(
+      path.join(tmpDir, "node_modules", "not-installed")
+    );
+    const wildcardTargets = missingDependencyPaths(
+      "#abcdef-value/very-long",
+      context,
+      [".js"]
+    );
+    expect(wildcardTargets).toContain(path.join(tmpDir, "short-prefix"));
+    expect(wildcardTargets).toContain(path.join(tmpDir, "long-prefix"));
     expect(missingDependencyPaths("data:text/javascript,0", context, [".js"])).toEqual([]);
   });
 
@@ -194,6 +257,132 @@ describe("review regressions", () => {
     expect([...watched]).toContain(path.join(tmpDir, "later.js"));
   });
 
+  it("watches a package scope for a missing imports target", async () => {
+    fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({
+      type: "module",
+      imports: {
+        "#future": "./generated/future.js"
+      }
+    }));
+    const input = path.join(tmpDir, "entry.mjs");
+    fs.writeFileSync(input, "import '#future';\n");
+
+    let watchedMissing;
+    const watchFileSystem = {
+      watch(files, dirs, missing) {
+        watchedMissing = new Set(missing);
+        return {
+          close() {},
+          pause() {},
+          getInfo: () => ({
+            changes: new Set(),
+            removals: new Set(),
+            fileTimeInfoEntries: new Map(),
+            contextTimeInfoEntries: new Map()
+          })
+        };
+      }
+    };
+
+    const { handler, close } = ncc(input, {
+      cache: false,
+      esm: true,
+      quiet: true,
+      watch: watchFileSystem
+    });
+    const build = new Promise((resolve, reject) => {
+      handler(({ err }) => err ? reject(err) : resolve());
+    });
+    await build;
+    await new Promise(resolve => setImmediate(resolve));
+    close();
+
+    expect(watchedMissing).toBeDefined();
+    expect([...watchedMissing]).toContain(path.join(tmpDir, "generated"));
+  });
+
+  it("does not ignore bundled node_modules changes in watch mode", async () => {
+    const packageDir = path.join(tmpDir, "node_modules", "watched-dependency");
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+      name: "watched-dependency",
+      main: "index.js"
+    }));
+    fs.writeFileSync(path.join(packageDir, "index.js"), "module.exports = 1;\n");
+    const input = path.join(tmpDir, "entry.js");
+    fs.writeFileSync(input, "module.exports = require('watched-dependency');\n");
+
+    let watchOptions;
+    const watchFileSystem = {
+      watch(files, dirs, missing, startTime, options) {
+        watchOptions = options;
+        return {
+          close() {},
+          pause() {},
+          getInfo: () => ({
+            changes: new Set(),
+            removals: new Set(),
+            fileTimeInfoEntries: new Map(),
+            contextTimeInfoEntries: new Map()
+          })
+        };
+      }
+    };
+
+    const { handler, close } = ncc(input, {
+      cache: false,
+      quiet: true,
+      watch: watchFileSystem
+    });
+    const build = new Promise((resolve, reject) => {
+      handler(({ err }) => err ? reject(err) : resolve());
+    });
+    await build;
+    await new Promise(resolve => setImmediate(resolve));
+    close();
+
+    expect(watchOptions).toBeDefined();
+    expect(watchOptions.ignored).toEqual([]);
+  });
+
+  it("watches the TypeScript fallback for a missing .js request", async () => {
+    const input = path.join(tmpDir, "entry.ts");
+    fs.writeFileSync(input, "require('./later.js');\n");
+
+    let watched;
+    const watchFileSystem = {
+      watch(files, dirs, missing) {
+        watched = new Set(missing);
+        return {
+          close() {},
+          pause() {},
+          getInfo: () => ({
+            changes: new Set(),
+            removals: new Set(),
+            fileTimeInfoEntries: new Map(),
+            contextTimeInfoEntries: new Map()
+          })
+        };
+      }
+    };
+
+    const { handler, close } = ncc(input, {
+      cache: false,
+      quiet: true,
+      transpileOnly: true,
+      watch: watchFileSystem
+    });
+    const build = new Promise((resolve, reject) => {
+      handler(({ err }) => err ? reject(err) : resolve());
+    });
+    await build;
+    await new Promise(resolve => setImmediate(resolve));
+    close();
+
+    expect(watched).toBeDefined();
+    expect([...watched]).toContain(path.join(tmpDir, "later.ts"));
+  });
+
   it("classifies known resolver misses without broad substring matching", () => {
     expect(isResolverNotFoundError({ code: "MODULE_NOT_FOUND" })).toBe(true);
     expect(isResolverNotFoundError({ name: "ModuleNotFoundError" })).toBe(true);
@@ -223,6 +412,97 @@ describe("review regressions", () => {
       content: '{"value":true}',
       map: { version: 3 }
     });
+  });
+
+  it("reports a TypeScript config diagnostic once per compilation", async () => {
+    const errors = [];
+    const compilation = {
+      errors,
+      hooks: {
+        finishModules: {
+          tap() {}
+        }
+      }
+    };
+    const load = resourcePath => new Promise((resolve, reject) => {
+      tsLoader.call({
+        _compilation: compilation,
+        resourcePath,
+        sourceMap: false,
+        cacheable() {},
+        getOptions() {
+          return {
+            compiler: require("typescript"),
+            compilerOptions: { target: "definitely-invalid" },
+            configFileDirectory: tmpDir,
+            transpileOnly: true
+          };
+        },
+        async() {
+          return err => err ? reject(err) : resolve();
+        },
+        emitError(error) {
+          errors.push(error);
+        }
+      }, Buffer.from("export const value = 1;"));
+    });
+
+    await load(path.join(tmpDir, "a.ts"));
+    await load(path.join(tmpDir, "b.ts"));
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain("TS6046");
+  });
+
+  it("emits TypeScript declarations once from the shared program", async () => {
+    const finishModules = [];
+    const emitted = new Map();
+    const compilation = {
+      errors: [],
+      emitAsset(name, source) {
+        emitted.set(name, source.source());
+      },
+      hooks: {
+        finishModules: {
+          tap(_name, handler) {
+            finishModules.push(handler);
+          }
+        }
+      }
+    };
+    const resourcePath = path.join(tmpDir, "source.ts");
+    fs.writeFileSync(resourcePath, "export function value(input: string): string { return input; }\n");
+
+    await new Promise((resolve, reject) => {
+      tsLoader.call({
+        _compilation: compilation,
+        resourcePath,
+        sourceMap: false,
+        cacheable() {},
+        getOptions() {
+          return {
+            compiler: require("typescript"),
+            compilerOptions: {
+              declaration: true,
+              module: "esnext",
+              target: "esnext",
+              outDir: "//"
+            },
+            configFileDirectory: tmpDir
+          };
+        },
+        async() {
+          return err => err ? reject(err) : resolve();
+        },
+        emitError: reject
+      }, Buffer.from(fs.readFileSync(resourcePath)));
+    });
+
+    expect(finishModules).toHaveLength(1);
+    finishModules[0]();
+    expect(emitted.get("source.d.ts")).toContain(
+      "export declare function value(input: string): string;"
+    );
   });
 
   it("shares one TypeScript type-check program across source directories", async () => {

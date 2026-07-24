@@ -271,12 +271,32 @@ function ncc (
           // would satisfy it are only watched if ncc registers them itself.
           const registerMissingDependencies = (request, context) => {
             const missingDependencies = compilation.missingDependencies;
+            const fileDependencies = compilation.fileDependencies;
             if (!missingDependencies || typeof missingDependencies.add !== 'function') return;
             const key = `${context}\0${request}`;
             if (registeredMissingRequests.has(key)) return;
             registeredMissingRequests.add(key);
-            for (const path of missingDependencyPaths(request, context, SUPPORTED_EXTENSIONS, missingDependencyCache))
-              missingDependencies.add(path);
+            for (const path of missingDependencyPaths(
+              request,
+              context,
+              SUPPORTED_EXTENSIONS,
+              missingDependencyCache,
+              mainFields
+            )) {
+              let isFile = false;
+              try {
+                isFile = fs.statSync(path).isFile();
+              } catch (e) {}
+              if (
+                isFile &&
+                fileDependencies &&
+                typeof fileDependencies.add === 'function'
+              ) {
+                fileDependencies.add(path);
+              } else {
+                missingDependencies.add(path);
+              }
+            }
           };
           const resolveRequest = (resolveData, context, request, done) => {
             const contextInfo = resolveData.contextInfo || { issuer: '' };
@@ -320,6 +340,7 @@ function ncc (
 
             const handleMissing = () => {
               registerMissingDependencies(request, context);
+              if (tsRequest) registerMissingDependencies(tsRequest, context);
               resolveData.request = __dirname + '/@@notfound.js?' + (externalMap.get(request) || request);
               callback();
             };
@@ -371,35 +392,6 @@ function ncc (
           if (rebuildHandler)
             rebuildHandler();
         });
-        if (compiler.hooks.normalModuleFactory) {
-          compiler.hooks.normalModuleFactory.tap("ncc", NormalModuleFactory => {
-            if (!NormalModuleFactory.hooks || !NormalModuleFactory.hooks.parser) {
-              return NormalModuleFactory;
-            }
-            function handler(parser) {
-              if (!parser.hooks || !parser.hooks.assign) {
-                return;
-              }
-              parser.hooks.assign.for("require").intercept({
-                register: tapInfo => {
-                  if (tapInfo.name !== "CommonJsPlugin") {
-                    return tapInfo;
-                  }
-                  tapInfo.fn = () => {};
-                  return tapInfo;
-                }
-              });
-            }
-            NormalModuleFactory.hooks.parser
-              .for("javascript/auto")
-              .tap("ncc", handler);
-            NormalModuleFactory.hooks.parser
-              .for("javascript/dynamic")
-              .tap("ncc", handler);
-
-            return NormalModuleFactory;
-          });
-        }
       }
     }
   ]
@@ -641,7 +633,9 @@ function ncc (
       }
     }
     let cachedResult;
-    watcher = compiler.watch({}, async (err, stats) => {
+    // ncc bundles dependency source, so a change inside node_modules changes
+    // the output. Rspack ignores node_modules by default.
+    watcher = compiler.watch({ ignored: [] }, async (err, stats) => {
       if (err) {
         compilationStack.pop();
         return watchHandler({ err });
