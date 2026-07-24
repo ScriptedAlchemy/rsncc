@@ -1,24 +1,7 @@
 const relocateLoader = require('@vercel/webpack-asset-relocator-loader');
 const fs = require('fs');
 
-function ensureMainTemplate(compilation) {
-  if (!compilation || compilation.mainTemplate) {
-    return;
-  }
-  compilation.mainTemplate = {
-    hooks: {
-      requireExtensions: {
-        taps: [],
-        tap(_name, fn) {
-          this.taps.push(fn);
-        }
-      }
-    }
-  };
-}
-
 function wrappedRelocateLoader(content, map) {
-  ensureMainTemplate(this._compilation);
   if (this.resourcePath && this.resourcePath.endsWith('.node')) {
     try {
       const fileBuffer = fs.readFileSync(this.resourcePath);
@@ -29,6 +12,9 @@ function wrappedRelocateLoader(content, map) {
       // keep original content on read failure
     }
   }
+  // The relocator can receive JSON through composed loader calls even though
+  // ncc's top-level rule excludes it. Its JSON branch reads `code` before that
+  // variable is initialized, so pass JSON through before delegating.
   if (this.resourcePath && this.resourcePath.endsWith('.json') && content !== undefined && content !== null) {
     const callback = this.async();
     const result = typeof content === 'string' ? content : content.toString();
@@ -53,7 +39,6 @@ wrappedRelocateLoader.raw = relocateLoader.raw;
 wrappedRelocateLoader.getAssetMeta = relocateLoader.getAssetMeta;
 wrappedRelocateLoader.getSymlinks = relocateLoader.getSymlinks;
 wrappedRelocateLoader.initAssetCache = function initAssetCache(compilation, outputAssetBase) {
-  ensureMainTemplate(compilation);
   return relocateLoader.initAssetCache(compilation, outputAssetBase);
 };
 wrappedRelocateLoader.initAssetMetaCache = wrappedRelocateLoader.initAssetCache;

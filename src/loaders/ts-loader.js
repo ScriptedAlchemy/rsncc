@@ -74,8 +74,9 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
     callback(null, input, inputSourceMap);
     return;
   }
+  const configFileDirectory = options.configFileDirectory || path.dirname(fileName);
   const parsedConfig = typescript.convertCompilerOptionsFromJson
-    ? typescript.convertCompilerOptionsFromJson(compilerOptions, path.dirname(fileName))
+    ? typescript.convertCompilerOptionsFromJson(compilerOptions, configFileDirectory)
     : { options: compilerOptions, errors: [] };
   const parsedOptions = parsedConfig.options || compilerOptions;
   const configDiagnosticsText = formatDiagnostics(typescript, parsedConfig.errors || []);

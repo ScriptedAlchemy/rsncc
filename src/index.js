@@ -12,6 +12,9 @@ const nccCacheDir = require("./utils/ncc-cache-dir");
 const LicenseWebpackPlugin = require('license-webpack-plugin').LicenseWebpackPlugin;
 const { version: nccVersion } = require('../package.json');
 const { hasTypeModule } = require('./utils/has-type-module');
+const formatCompilationErrors = require('./utils/format-compilation-errors');
+const isResolverNotFoundError = require('./utils/is-resolver-not-found-error');
+const missingDependencyPaths = require('./utils/missing-dependency-paths');
 
 // support glob graceful-fs
 fs.gracefulify(require("fs"));
@@ -144,6 +147,7 @@ function ncc (
   // error if there's no tsconfig in the working directory
   let fullTsconfig = {};
   let resolveTsConfig;
+  let tsconfigDirectory = dirname(resolvedEntry);
   try {
     const configFileAbsolutePath = walkParentDirs({
       base: process.cwd(),
@@ -154,6 +158,7 @@ function ncc (
       compilerOptions: {}
     };
     if (configFileAbsolutePath) {
+      tsconfigDirectory = dirname(configFileAbsolutePath);
       resolveTsConfig = {
         configFile: configFileAbsolutePath,
         references: 'auto'
@@ -220,7 +225,38 @@ function ncc (
           if (!normalModuleFactory || !normalModuleFactory.hooks || !normalModuleFactory.hooks.beforeResolve) {
             return;
           }
-          const resolver = normalModuleFactory.getResolver("normal");
+          const resolvers = new Map();
+          const dependencyTypes = new Map();
+          const getDependencyTypes = resolveData => {
+            if (resolveData.dependencyType) return [resolveData.dependencyType];
+            const issuer = resolveData.contextInfo && resolveData.contextInfo.issuer;
+            const source = issuer || resolveData.request;
+            if (dependencyTypes.has(source)) return dependencyTypes.get(source);
+            const sourcePath = source.split('?', 1)[0];
+            let primaryType;
+            if (/\.(?:mjs|mts|ts|tsx)$/.test(sourcePath)) {
+              primaryType = 'esm';
+            } else if (/\.(?:cjs|cts)$/.test(sourcePath)) {
+              primaryType = 'commonjs';
+            } else {
+              primaryType = hasTypeModule(sourcePath) || esm ? 'esm' : 'commonjs';
+            }
+            const types = [
+              primaryType,
+              primaryType === 'esm' ? 'commonjs' : 'esm',
+              'url',
+              'worker'
+            ];
+            dependencyTypes.set(source, types);
+            return types;
+          };
+          const getResolver = dependencyType => {
+            const key = dependencyType || 'undefined';
+            if (!resolvers.has(key)) {
+              resolvers.set(key, normalModuleFactory.getResolver("normal", { dependencyType }));
+            }
+            return resolvers.get(key);
+          };
           const isBuiltin = request => {
             if (!request) return false;
             if (builtinModuleSet.has(request)) return true;
@@ -229,22 +265,39 @@ function ncc (
             }
             return false;
           };
-          const isNotFoundError = err => {
-            if (!err || !err.message) return false;
-            return err.message.includes('NotFound') ||
-              err.message.startsWith("Can't resolve") ||
-              err.message.startsWith("Cannot resolve");
+          const missingDependencyCache = new Map();
+          const registeredMissingRequests = new Set();
+          // A rewritten request is never resolved by rspack, so the paths that
+          // would satisfy it are only watched if ncc registers them itself.
+          const registerMissingDependencies = (request, context) => {
+            const missingDependencies = compilation.missingDependencies;
+            if (!missingDependencies || typeof missingDependencies.add !== 'function') return;
+            const key = `${context}\0${request}`;
+            if (registeredMissingRequests.has(key)) return;
+            registeredMissingRequests.add(key);
+            for (const path of missingDependencyPaths(request, context, SUPPORTED_EXTENSIONS, missingDependencyCache))
+              missingDependencies.add(path);
           };
-          const resolveRequest = (resolveData, request, done) => {
-            const issuer = resolveData.contextInfo && resolveData.contextInfo.issuer;
+          const resolveRequest = (resolveData, context, request, done) => {
             const contextInfo = resolveData.contextInfo || { issuer: '' };
-            const context = resolveData.context || (issuer ? dirname(issuer) : process.cwd());
-            const resolveContext = {
-              fileDependencies: new Set(),
-              contextDependencies: new Set(),
-              missingDependencies: new Set()
+            const types = getDependencyTypes(resolveData);
+            let index = 0;
+            let lastError;
+            let shouldDefer = false;
+            const tryResolve = () => {
+              // A probe that resolves is resolved again by rspack, and a probe
+              // that misses reports no paths, so its resolve context is unused.
+              getResolver(types[index++]).resolve(contextInfo, context, request, {}, (err, result) => {
+                if (result) return done(null, result, false);
+                if (err) {
+                  lastError = err;
+                  if (!isResolverNotFoundError(err)) shouldDefer = true;
+                }
+                if (index < types.length) return tryResolve();
+                done(lastError, undefined, shouldDefer);
+              });
             };
-            resolver.resolve(contextInfo, context, request, resolveContext, done);
+            tryResolve();
           };
           // Rspack does not currently expose a JS hook for recovering after a
           // failed normal-module resolution (see web-infra-dev/rspack#14640),
@@ -257,6 +310,7 @@ function ncc (
             if (externalMap.get(request)) return callback();
 
             const issuer = resolveData.contextInfo && resolveData.contextInfo.issuer;
+            const context = resolveData.context || (issuer ? dirname(issuer) : process.cwd());
             const isTsIssuer = issuer && (issuer.endsWith('.ts') || issuer.endsWith('.tsx'));
             const [requestPath, requestQuery] = request.split('?', 2);
             const hasJsExtension = requestPath.endsWith('.js');
@@ -265,12 +319,16 @@ function ncc (
               : null;
 
             const handleMissing = () => {
+              registerMissingDependencies(request, context);
               resolveData.request = __dirname + '/@@notfound.js?' + (externalMap.get(request) || request);
               callback();
             };
 
-            const handleResolution = (err, result) => {
-              if (err && !isNotFoundError(err)) {
+            const handleResolution = (err, result, shouldDefer) => {
+              if (shouldDefer) {
+                return callback();
+              }
+              if (err && !isResolverNotFoundError(err)) {
                 return callback(err);
               }
               if (!err && result) {
@@ -280,15 +338,21 @@ function ncc (
             };
 
             if (isTsIssuer && hasJsExtension) {
-              return resolveRequest(resolveData, request, (err, result) => {
-                if (err && !isNotFoundError(err)) {
+              return resolveRequest(resolveData, context, request, (err, result, shouldDefer) => {
+                if (shouldDefer) {
+                  return callback();
+                }
+                if (err && !isResolverNotFoundError(err)) {
                   return callback(err);
                 }
                 if (!err && result) {
                   return callback();
                 }
-                return resolveRequest(resolveData, tsRequest, (tsErr, tsResult) => {
-                  if (tsErr && !isNotFoundError(tsErr)) {
+                return resolveRequest(resolveData, context, tsRequest, (tsErr, tsResult, shouldDeferTs) => {
+                  if (shouldDeferTs) {
+                    return callback();
+                  }
+                  if (tsErr && !isResolverNotFoundError(tsErr)) {
                     return callback(tsErr);
                   }
                   if (!tsErr && tsResult) {
@@ -300,7 +364,7 @@ function ncc (
               });
             }
 
-            return resolveRequest(resolveData, request, handleResolution);
+            return resolveRequest(resolveData, context, request, handleResolution);
           });
         });
         compiler.hooks.watchRun.tap("ncc", () => {
@@ -470,6 +534,7 @@ function ncc (
             options: {
               transpileOnly,
               compiler: eval('__dirname + "/typescript.js"'),
+              configFileDirectory: tsconfigDirectory,
               compilerOptions: {
                 module: 'esnext',
                 target: 'esnext',
@@ -506,14 +571,10 @@ function ncc (
         compiler.close(err => {
           if (err) return reject(err);
           if (stats.hasErrors()) {
-            const errLog = [...stats.compilation.errors].map(err => {
-              const message = err && err.message ? err.message : String(err);
-              return message
-                .split('\n')
-                .filter(line => !line.trim().startsWith('at '))
-                .join('\n');
-            }).join('\n');
-            return reject(new Error(errLog));
+            const errLog = formatCompilationErrors([...stats.compilation.errors]);
+            const compilationError = new Error(errLog);
+            compilationError.nccError = true;
+            return reject(compilationError);
           }
           resolve(stats);
         });
