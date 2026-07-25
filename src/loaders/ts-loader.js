@@ -61,27 +61,15 @@ function splitDiagnostics(typescript, diagnostics) {
   return { errors, warnings };
 }
 
-function reportLoaderDiagnostics(loaderContext, typescript, diagnostics) {
+function reportDiagnostics(typescript, diagnostics, emitError, emitWarning) {
   const { errors, warnings } = splitDiagnostics(typescript, diagnostics);
   const errorsText = formatDiagnostics(typescript, errors);
   if (errorsText) {
-    loaderContext.emitError(new Error(errorsText));
+    emitError(new Error(errorsText));
   }
   const warningsText = formatDiagnostics(typescript, warnings);
-  if (warningsText && loaderContext.emitWarning) {
-    loaderContext.emitWarning(new Error(warningsText));
-  }
-}
-
-function reportCompilationDiagnostics(compilation, typescript, diagnostics) {
-  const { errors, warnings } = splitDiagnostics(typescript, diagnostics);
-  const errorsText = formatDiagnostics(typescript, errors);
-  if (errorsText) {
-    compilation.errors.push(new Error(errorsText));
-  }
-  const warningsText = formatDiagnostics(typescript, warnings);
-  if (warningsText && compilation.warnings) {
-    compilation.warnings.push(new Error(warningsText));
+  if (warningsText && emitWarning) {
+    emitWarning(new Error(warningsText));
   }
 }
 
@@ -104,20 +92,11 @@ function getTypeCheckState(loaderContext, typescript, parsedOptions) {
     emitDiagnostics: [],
     emitAsset: typeof compilation.emitAsset === "function"
       ? compilation.emitAsset.bind(compilation)
-      : null,
-    reported: false
+      : null
   };
   compilation.__nccTsLoaderState.set(stateKey, state);
   compilation.hooks.finishModules.tap("ncc-ts-loader", () => {
-    if (state.reported || state.files.size === 0) {
-      return;
-    }
-    state.reported = true;
-    const program = state.program || typescript.createProgram(
-      Array.from(state.files),
-      parsedOptions,
-      state.host
-    );
+    const program = state.program;
     let diagnostics = state.emitDiagnostics.concat(
       typescript.getPreEmitDiagnostics(program)
     );
@@ -152,7 +131,14 @@ function getTypeCheckState(loaderContext, typescript, parsedOptions) {
       typescript,
       diagnostics
     );
-    reportCompilationDiagnostics(compilation, typescript, diagnostics);
+    reportDiagnostics(
+      typescript,
+      diagnostics,
+      error => compilation.errors.push(error),
+      compilation.warnings
+        ? warning => compilation.warnings.push(warning)
+        : null
+    );
   });
   return state;
 }
@@ -235,7 +221,12 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
   }
 
   diagnostics = dedupeDiagnostics(this._compilation, typescript, diagnostics);
-  reportLoaderDiagnostics(this, typescript, diagnostics);
+  reportDiagnostics(
+    typescript,
+    diagnostics,
+    error => this.emitError(error),
+    this.emitWarning ? warning => this.emitWarning(warning) : null
+  );
 
   let map = inputSourceMap;
   if (sourceMapText) {

@@ -24,6 +24,39 @@ class StoreStream extends Writable {
   }
 }
 
+function createWatchFileSystem(onWatch) {
+  return {
+    watch(...args) {
+      onWatch(...args);
+      return {
+        close() {},
+        pause() {},
+        getInfo: () => ({
+          changes: new Set(),
+          removals: new Set(),
+          fileTimeInfoEntries: new Map(),
+          contextTimeInfoEntries: new Map()
+        })
+      };
+    }
+  };
+}
+
+async function runWatchedBuild(input, options, onWatch) {
+  const watcher = ncc(input, {
+    cache: false,
+    quiet: true,
+    ...options,
+    watch: createWatchFileSystem(onWatch)
+  });
+  const result = await new Promise((resolve, reject) => {
+    watcher.handler(value => value.err ? reject(value.err) : resolve(value));
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  watcher.close();
+  return result;
+}
+
 describe("review regressions", () => {
   let tmpDir;
 
@@ -222,35 +255,16 @@ describe("review regressions", () => {
     fs.writeFileSync(input, "import value from '@value'; console.log(value);\n");
 
     let watchedFiles;
-    const watchFileSystem = {
-      watch(files) {
-        watchedFiles = new Set(files);
-        return {
-          close() {},
-          pause() {},
-          getInfo: () => ({
-            changes: new Set(),
-            removals: new Set(),
-            fileTimeInfoEntries: new Map(),
-            contextTimeInfoEntries: new Map()
-          })
-        };
-      }
-    };
     const previousProject = process.env.TS_NODE_PROJECT;
     delete process.env.TS_NODE_PROJECT;
     try {
-      const { handler, close } = ncc(input, {
-        cache: false,
-        quiet: true,
-        transpileOnly: true,
-        watch: watchFileSystem
-      });
-      const result = await new Promise((resolve, reject) => {
-        handler(value => value.err ? reject(value.err) : resolve(value));
-      });
-      await new Promise(resolve => setImmediate(resolve));
-      close();
+      const result = await runWatchedBuild(
+        input,
+        { transpileOnly: true },
+        files => {
+          watchedFiles = new Set(files);
+        }
+      );
       const output = path.join(tmpDir, "output.js");
       fs.writeFileSync(output, result.code);
 
@@ -357,33 +371,9 @@ describe("review regressions", () => {
     fs.writeFileSync(input, "module.exports = require('./later');\n");
 
     let watched;
-    const watchFileSystem = {
-      watch(files, dirs, missing) {
-        watched = new Set(missing);
-        return {
-          close() {},
-          pause() {},
-          getInfo: () => ({
-            changes: new Set(),
-            removals: new Set(),
-            fileTimeInfoEntries: new Map(),
-            contextTimeInfoEntries: new Map()
-          })
-        };
-      }
-    };
-
-    const { handler, close } = ncc(input, {
-      cache: false,
-      quiet: true,
-      watch: watchFileSystem
+    await runWatchedBuild(input, {}, (_files, _dirs, missing) => {
+      watched = new Set(missing);
     });
-    const build = new Promise((resolve, reject) => {
-      handler(({ err }) => err ? reject(err) : resolve());
-    });
-    await build;
-    await new Promise(resolve => setImmediate(resolve));
-    close();
 
     expect(watched).toBeDefined();
     expect([...watched]).toContain(path.join(tmpDir, "later.js"));
@@ -400,34 +390,9 @@ describe("review regressions", () => {
     fs.writeFileSync(input, "import '#future';\n");
 
     let watchedMissing;
-    const watchFileSystem = {
-      watch(files, dirs, missing) {
-        watchedMissing = new Set(missing);
-        return {
-          close() {},
-          pause() {},
-          getInfo: () => ({
-            changes: new Set(),
-            removals: new Set(),
-            fileTimeInfoEntries: new Map(),
-            contextTimeInfoEntries: new Map()
-          })
-        };
-      }
-    };
-
-    const { handler, close } = ncc(input, {
-      cache: false,
-      esm: true,
-      quiet: true,
-      watch: watchFileSystem
+    await runWatchedBuild(input, { esm: true }, (_files, _dirs, missing) => {
+      watchedMissing = new Set(missing);
     });
-    const build = new Promise((resolve, reject) => {
-      handler(({ err }) => err ? reject(err) : resolve());
-    });
-    await build;
-    await new Promise(resolve => setImmediate(resolve));
-    close();
 
     expect(watchedMissing).toBeDefined();
     expect([...watchedMissing]).toContain(path.join(tmpDir, "generated"));
@@ -445,33 +410,9 @@ describe("review regressions", () => {
     fs.writeFileSync(input, "module.exports = require('watched-dependency');\n");
 
     let watchOptions;
-    const watchFileSystem = {
-      watch(files, dirs, missing, startTime, options) {
-        watchOptions = options;
-        return {
-          close() {},
-          pause() {},
-          getInfo: () => ({
-            changes: new Set(),
-            removals: new Set(),
-            fileTimeInfoEntries: new Map(),
-            contextTimeInfoEntries: new Map()
-          })
-        };
-      }
-    };
-
-    const { handler, close } = ncc(input, {
-      cache: false,
-      quiet: true,
-      watch: watchFileSystem
+    await runWatchedBuild(input, {}, (_files, _dirs, _missing, _startTime, options) => {
+      watchOptions = options;
     });
-    const build = new Promise((resolve, reject) => {
-      handler(({ err }) => err ? reject(err) : resolve());
-    });
-    await build;
-    await new Promise(resolve => setImmediate(resolve));
-    close();
 
     expect(watchOptions).toBeDefined();
     expect(watchOptions.ignored).toEqual([]);
@@ -482,34 +423,13 @@ describe("review regressions", () => {
     fs.writeFileSync(input, "require('./later.js');\n");
 
     let watched;
-    const watchFileSystem = {
-      watch(files, dirs, missing) {
+    await runWatchedBuild(
+      input,
+      { transpileOnly: true },
+      (_files, _dirs, missing) => {
         watched = new Set(missing);
-        return {
-          close() {},
-          pause() {},
-          getInfo: () => ({
-            changes: new Set(),
-            removals: new Set(),
-            fileTimeInfoEntries: new Map(),
-            contextTimeInfoEntries: new Map()
-          })
-        };
       }
-    };
-
-    const { handler, close } = ncc(input, {
-      cache: false,
-      quiet: true,
-      transpileOnly: true,
-      watch: watchFileSystem
-    });
-    const build = new Promise((resolve, reject) => {
-      handler(({ err }) => err ? reject(err) : resolve());
-    });
-    await build;
-    await new Promise(resolve => setImmediate(resolve));
-    close();
+    );
 
     expect(watched).toBeDefined();
     expect([...watched]).toContain(path.join(tmpDir, "later.ts"));

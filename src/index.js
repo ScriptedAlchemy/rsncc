@@ -193,6 +193,7 @@ function ncc (
     const regexps = [];
     const aliasMap = new Map();
     const regexCache = new Map();
+    const noRegexMatch = Symbol("no regex match");
 
     function set(key, value) {
       if (key instanceof RegExp)
@@ -202,7 +203,10 @@ function ncc (
 
     function get(key) {
       if (aliasMap.has(key)) return aliasMap.get(key);
-      if (regexCache.has(key)) return regexCache.get(key);
+      if (regexCache.has(key)) {
+        const result = regexCache.get(key);
+        return result === noRegexMatch ? null : result;
+      }
 
       for (const regex of regexps) {
         const matches = key.match(regex)
@@ -222,6 +226,7 @@ function ncc (
           return result
         }
       }
+      regexCache.set(key, noRegexMatch);
       return null;
     }
 
@@ -306,10 +311,8 @@ function ncc (
               missingDependencyCache,
               mainFields
             )) {
-              let isFile = false;
-              try {
-                isFile = fs.statSync(path).isFile();
-              } catch (e) {}
+              const stats = missingDependencyCache.get(path);
+              const isFile = stats ? stats.isFile() : false;
               if (
                 isFile &&
                 fileDependencies &&
@@ -350,7 +353,8 @@ function ncc (
             const request = resolveData.request;
             if (request.includes('/@@notfound.js')) return callback();
             if (isBuiltin(request)) return callback();
-            if (externalMap.get(request)) return callback();
+            const external = externalMap.get(request);
+            if (external) return callback();
 
             const issuer = resolveData.contextInfo && resolveData.contextInfo.issuer;
             const context = resolveData.context || (issuer ? dirname(issuer) : process.cwd());
@@ -364,7 +368,7 @@ function ncc (
             const handleMissing = () => {
               registerMissingDependencies(request, context);
               if (tsRequest) registerMissingDependencies(tsRequest, context);
-              resolveData.request = __dirname + '/@@notfound.js?' + (externalMap.get(request) || request);
+              resolveData.request = __dirname + '/@@notfound.js?' + (external || request);
               callback();
             };
 

@@ -4,17 +4,20 @@ const { basename, dirname, isAbsolute, join, resolve: pathResolve } = require("p
 const packageRequest = /^(@[^/]+\/[^/]+|[^/]+)(\/.*)?$/;
 const schemeRequest = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
 
-const isDirectory = (path, cache) => {
-  let result = cache.get(path);
-  if (result === undefined) {
+const getStats = (path, cache) => {
+  if (!cache.has(path)) {
+    let stats = null;
     try {
-      result = fs.statSync(path).isDirectory();
-    } catch (e) {
-      result = false;
-    }
-    cache.set(path, result);
+      stats = fs.statSync(path);
+    } catch (e) {}
+    cache.set(path, stats);
   }
-  return result;
+  return cache.get(path);
+};
+
+const isDirectory = (path, cache) => {
+  const stats = getStats(path, cache);
+  return stats ? stats.isDirectory() : false;
 };
 
 // Watching a candidate only pays off up to its first missing segment: creating
@@ -45,13 +48,14 @@ const lookupDirectories = context => {
   }
 };
 
-const findPackageScope = context => {
+const findPackageScope = (context, cache) => {
   const packageJsonCandidates = [];
   for (const directory of lookupDirectories(context)) {
     const packageJson = join(directory, "package.json");
     packageJsonCandidates.push(packageJson);
     try {
-      if (fs.statSync(packageJson).isFile()) {
+      const stats = getStats(packageJson, cache);
+      if (stats && stats.isFile()) {
         return {
           directory,
           packageJson,
@@ -211,7 +215,7 @@ module.exports = function missingDependencyPaths(
   if (requestPath.startsWith(".") || isAbsolute(requestPath)) {
     candidates = fileCandidates(pathResolve(context, requestPath), extensions);
   } else if (requestPath.startsWith("#")) {
-    const scope = findPackageScope(context);
+    const scope = findPackageScope(context, cache);
     candidates = scope.packageJson
       ? [
           scope.packageJson,
@@ -227,39 +231,12 @@ module.exports = function missingDependencyPaths(
   } else if (schemeRequest.test(requestPath)) {
     return [];
   } else {
-    const match = packageRequest.exec(requestPath);
-    if (!match) return [];
-    const [, name, subpath] = match;
-    candidates = [];
-    for (const directory of lookupDirectories(context)) {
-      const packageDirectory = join(directory, "node_modules", name);
-      const packageJson = join(packageDirectory, "package.json");
-      candidates.push(...(subpath
-        ? [packageJson, ...fileCandidates(join(packageDirectory, subpath), extensions)]
-        : moduleCandidates(packageDirectory, extensions)));
-      try {
-        const data = JSON.parse(fs.readFileSync(packageJson, "utf8"));
-        const exportsKey = subpath ? `.${subpath}` : ".";
-        candidates.push(
-          ...mappedTargetCandidates(
-            data.exports,
-            exportsKey,
-            packageDirectory,
-            extensions,
-            mainFields
-          )
-        );
-        if (!subpath) {
-          for (const field of mainFields) {
-            if (typeof data[field] === "string") {
-              candidates.push(
-                ...fileCandidates(pathResolve(packageDirectory, data[field]), extensions)
-              );
-            }
-          }
-        }
-      } catch (e) {}
-    }
+    candidates = bareTargetCandidates(
+      requestPath,
+      context,
+      extensions,
+      mainFields
+    );
   }
 
   const paths = new Set();
