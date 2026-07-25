@@ -49,6 +49,42 @@ function dedupeDiagnostics(compilation, typescript, diagnostics) {
   });
 }
 
+function splitDiagnostics(typescript, diagnostics) {
+  const errorCategory = typescript.DiagnosticCategory
+    ? typescript.DiagnosticCategory.Error
+    : 1;
+  const errors = [];
+  const warnings = [];
+  for (const diagnostic of diagnostics || []) {
+    (diagnostic.category === errorCategory ? errors : warnings).push(diagnostic);
+  }
+  return { errors, warnings };
+}
+
+function reportLoaderDiagnostics(loaderContext, typescript, diagnostics) {
+  const { errors, warnings } = splitDiagnostics(typescript, diagnostics);
+  const errorsText = formatDiagnostics(typescript, errors);
+  if (errorsText) {
+    loaderContext.emitError(new Error(errorsText));
+  }
+  const warningsText = formatDiagnostics(typescript, warnings);
+  if (warningsText && loaderContext.emitWarning) {
+    loaderContext.emitWarning(new Error(warningsText));
+  }
+}
+
+function reportCompilationDiagnostics(compilation, typescript, diagnostics) {
+  const { errors, warnings } = splitDiagnostics(typescript, diagnostics);
+  const errorsText = formatDiagnostics(typescript, errors);
+  if (errorsText) {
+    compilation.errors.push(new Error(errorsText));
+  }
+  const warningsText = formatDiagnostics(typescript, warnings);
+  if (warningsText && compilation.warnings) {
+    compilation.warnings.push(new Error(warningsText));
+  }
+}
+
 function getTypeCheckState(loaderContext, typescript, parsedOptions) {
   const compilation = loaderContext._compilation;
   if (!compilation || !compilation.hooks || !compilation.hooks.finishModules || !compilation.errors) {
@@ -116,10 +152,7 @@ function getTypeCheckState(loaderContext, typescript, parsedOptions) {
       typescript,
       diagnostics
     );
-    const diagnosticsText = formatDiagnostics(typescript, diagnostics);
-    if (diagnosticsText) {
-      compilation.errors.push(new Error(diagnosticsText));
-    }
+    reportCompilationDiagnostics(compilation, typescript, diagnostics);
   });
   return state;
 }
@@ -202,10 +235,7 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
   }
 
   diagnostics = dedupeDiagnostics(this._compilation, typescript, diagnostics);
-  const diagnosticsText = formatDiagnostics(typescript, diagnostics);
-  if (diagnosticsText) {
-    this.emitError(new Error(diagnosticsText));
-  }
+  reportLoaderDiagnostics(this, typescript, diagnostics);
 
   let map = inputSourceMap;
   if (sourceMapText) {

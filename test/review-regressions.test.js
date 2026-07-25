@@ -586,6 +586,85 @@ describe("review regressions", () => {
     expect(errors[0].message).toContain("TS6046");
   });
 
+  it("reports TypeScript warnings without failing the compilation", async () => {
+    const finishModules = [];
+    const warnings = [];
+    const compilation = {
+      errors: [],
+      warnings,
+      hooks: {
+        finishModules: {
+          tap(_name, handler) {
+            finishModules.push(handler);
+          }
+        }
+      }
+    };
+    const warning = {
+      category: 0,
+      code: 9999,
+      messageText: "warning only"
+    };
+    const typescript = {
+      DiagnosticCategory: { Warning: 0, Error: 1 },
+      sys: { newLine: "\n" },
+      convertCompilerOptionsFromJson(options) {
+        return { options, errors: [] };
+      },
+      flattenDiagnosticMessageText(message) {
+        return String(message);
+      },
+      formatDiagnostics(diagnostics) {
+        return diagnostics.map(diagnostic => diagnostic.messageText).join("\n");
+      },
+      createCompilerHost() {
+        return {};
+      },
+      createProgram() {
+        return {
+          getSourceFile(fileName) {
+            return { fileName };
+          },
+          emit(_sourceFile, writeFile) {
+            writeFile(path.join(tmpDir, "entry.js"), "");
+            return { diagnostics: [warning] };
+          }
+        };
+      },
+      getPreEmitDiagnostics() {
+        return [warning];
+      }
+    };
+
+    await new Promise((resolve, reject) => {
+      tsLoader.call({
+        _compilation: compilation,
+        resourcePath: path.join(tmpDir, "entry.ts"),
+        sourceMap: false,
+        cacheable() {},
+        getOptions() {
+          return {
+            compiler: typescript,
+            compilerOptions: {},
+            configFileDirectory: tmpDir
+          };
+        },
+        async() {
+          return err => err ? reject(err) : resolve();
+        },
+        emitError: reject,
+        emitWarning(error) {
+          warnings.push(error);
+        }
+      }, Buffer.from("export default 1;"));
+    });
+
+    finishModules[0]();
+    expect(compilation.errors).toHaveLength(0);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain("warning only");
+  });
+
   it("emits TypeScript declarations once from the shared program", async () => {
     const finishModules = [];
     const emitted = new Map();
