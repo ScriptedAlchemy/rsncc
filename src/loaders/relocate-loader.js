@@ -12,9 +12,7 @@ function wrappedRelocateLoader(content, map) {
       // keep original content on read failure
     }
   }
-  // The relocator can receive JSON through composed loader calls even though
-  // ncc's top-level rule excludes it. Its JSON branch reads `code` before that
-  // variable is initialized, so pass JSON through before delegating.
+  // Guard the pinned relocator's JSON TDZ bug at asset-relocator.js:410.
   if (this.resourcePath && this.resourcePath.endsWith('.json') && content !== undefined && content !== null) {
     const callback = this.async();
     const result = typeof content === 'string' ? content : content.toString();

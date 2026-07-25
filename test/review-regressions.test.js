@@ -48,6 +48,49 @@ describe("review regressions", () => {
     expect(stderr.data).toBe("");
   });
 
+  it("evicts a module from the cache when its factory throws", async () => {
+    const flaky = path.join(tmpDir, "flaky.js");
+    fs.writeFileSync(flaky, [
+      "global.__nccModuleAttempts = (global.__nccModuleAttempts || 0) + 1;",
+      "if (global.__nccModuleAttempts === 1) throw new Error('first attempt');",
+      "module.exports = 'recovered';"
+    ].join("\n"));
+    const input = path.join(tmpDir, "entry.js");
+    fs.writeFileSync(input, [
+      "try { require('./flaky'); } catch (error) {}",
+      "module.exports = require('./flaky');"
+    ].join("\n"));
+
+    const { code } = await ncc(input, { cache: false, quiet: true });
+    const output = path.join(tmpDir, "output.js");
+    fs.writeFileSync(output, code);
+
+    expect(require(output)).toBe("recovered");
+    expect(global.__nccModuleAttempts).toBe(2);
+    delete global.__nccModuleAttempts;
+  });
+
+  it("does not rewrite module-cache-like user code", async () => {
+    const input = path.join(tmpDir, "entry.js");
+    fs.writeFileSync(input, [
+      "// The require function",
+      "const cachedModule = { error: new Error('user error') };",
+      "let caught = false;",
+      "try {",
+      "  if (cachedModule.error !== undefined) throw cachedModule.error;",
+      "} catch (error) {",
+      "  caught = error.message === 'user error';",
+      "}",
+      "module.exports = caught;"
+    ].join("\n"));
+
+    const { code } = await ncc(input, { cache: false, quiet: true });
+    const output = path.join(tmpDir, "output.js");
+    fs.writeFileSync(output, code);
+
+    expect(require(output)).toBe(true);
+  });
+
   it("uses dependency conditions when probing ESM package exports", async () => {
     const packageDir = path.join(tmpDir, "node_modules", "import-only");
     fs.mkdirSync(packageDir, { recursive: true });
@@ -133,6 +176,95 @@ describe("review regressions", () => {
       quiet: true,
       transpileOnly: true
     })).rejects.toThrow(/TS1110/);
+  });
+
+  it("preserves whole-program TypeScript emit semantics", async () => {
+    fs.writeFileSync(path.join(tmpDir, "globals.d.ts"), [
+      "declare const enum Level {",
+      "  High = 2",
+      "}"
+    ].join("\n"));
+    fs.writeFileSync(path.join(tmpDir, "types.ts"), "export interface Widget { value: string }\n");
+    const input = path.join(tmpDir, "entry.ts");
+    fs.writeFileSync(input, [
+      "/// <reference path=\"./globals.d.ts\" />",
+      "export { Widget } from './types';",
+      "console.log(Level.High);"
+    ].join("\n"));
+
+    const { code } = await ncc(input, { cache: false, quiet: true });
+    const output = path.join(tmpDir, "output.js");
+    fs.writeFileSync(output, code);
+    const runner = path.join(tmpDir, "runner.js");
+    fs.writeFileSync(runner, [
+      `const value = require(${JSON.stringify(output)});`,
+      "console.log('widget:' + ('Widget' in value));"
+    ].join("\n"));
+    const result = execFileSync(process.execPath, [runner], { encoding: "utf8" });
+
+    expect(result.trim().split("\n")).toEqual(["2", "widget:false"]);
+  });
+
+  it("discovers and tracks a tsconfig outside the current working directory", async () => {
+    const sourceDir = path.join(tmpDir, "src");
+    fs.mkdirSync(sourceDir);
+    const tsconfig = path.join(tmpDir, "tsconfig.json");
+    fs.writeFileSync(tsconfig, JSON.stringify({
+      compilerOptions: {
+        baseUrl: ".",
+        paths: {
+          "@value": ["src/value"]
+        }
+      }
+    }));
+    fs.writeFileSync(path.join(sourceDir, "value.ts"), "export default 'tsconfig-ok';\n");
+    const input = path.join(sourceDir, "entry.ts");
+    fs.writeFileSync(input, "import value from '@value'; console.log(value);\n");
+
+    let watchedFiles;
+    const watchFileSystem = {
+      watch(files) {
+        watchedFiles = new Set(files);
+        return {
+          close() {},
+          pause() {},
+          getInfo: () => ({
+            changes: new Set(),
+            removals: new Set(),
+            fileTimeInfoEntries: new Map(),
+            contextTimeInfoEntries: new Map()
+          })
+        };
+      }
+    };
+    const previousProject = process.env.TS_NODE_PROJECT;
+    delete process.env.TS_NODE_PROJECT;
+    try {
+      const { handler, close } = ncc(input, {
+        cache: false,
+        quiet: true,
+        transpileOnly: true,
+        watch: watchFileSystem
+      });
+      const result = await new Promise((resolve, reject) => {
+        handler(value => value.err ? reject(value.err) : resolve(value));
+      });
+      await new Promise(resolve => setImmediate(resolve));
+      close();
+      const output = path.join(tmpDir, "output.js");
+      fs.writeFileSync(output, result.code);
+
+      expect(execFileSync(process.execPath, [output], { encoding: "utf8" }).trim())
+        .toBe("tsconfig-ok");
+      expect(watchedFiles).toBeDefined();
+      expect([...watchedFiles]).toContain(tsconfig);
+    } finally {
+      if (previousProject === undefined) {
+        delete process.env.TS_NODE_PROJECT;
+      } else {
+        process.env.TS_NODE_PROJECT = previousProject;
+      }
+    }
   });
 
   it("tries URL resolution options for bare relative assets", async () => {
@@ -484,6 +616,7 @@ describe("review regressions", () => {
             compiler: require("typescript"),
             compilerOptions: {
               declaration: true,
+              declarationDir: path.join(tmpDir, "types"),
               module: "esnext",
               target: "esnext",
               outDir: "//"
@@ -537,7 +670,23 @@ describe("review regressions", () => {
       },
       createProgram(files, options) {
         programs.push({ files, options });
-        return {};
+        return {
+          getSourceFile(fileName) {
+            return { fileName };
+          },
+          emit(sourceFile, writeFile) {
+            writeFile(
+              sourceFile.fileName.replace(/\.tsx?$/, ".js.map"),
+              JSON.stringify({ tag: "javascript" })
+            );
+            writeFile(
+              sourceFile.fileName.replace(/\.tsx?$/, ".d.ts.map"),
+              JSON.stringify({ tag: "declaration" })
+            );
+            writeFile(sourceFile.fileName.replace(/\.tsx?$/, ".js"), "");
+            return { diagnostics: [] };
+          }
+        };
       },
       getPreEmitDiagnostics() {
         return [];
@@ -557,21 +706,20 @@ describe("review regressions", () => {
           };
         },
         async() {
-          return err => err ? reject(err) : resolve();
+          return (err, _output, map) => err ? reject(err) : resolve(map);
         },
         emitError: reject
       }, Buffer.from("export default 1;"));
     });
 
-    await load(path.join(tmpDir, "src", "a.ts"));
-    await load(path.join(tmpDir, "src", "nested", "b.ts"));
+    const firstMap = await load(path.join(tmpDir, "src", "a.ts"));
+    const secondMap = await load(path.join(tmpDir, "src", "nested", "b.ts"));
 
     expect(finishModules).toHaveLength(1);
     finishModules[0]();
     expect(programs).toHaveLength(1);
-    expect(programs[0].files).toEqual([
-      path.join(tmpDir, "src", "a.ts"),
-      path.join(tmpDir, "src", "nested", "b.ts")
-    ]);
+    expect(programs[0].files).toEqual([path.join(tmpDir, "src", "a.ts")]);
+    expect(firstMap.tag).toBe("javascript");
+    expect(secondMap.tag).toBe("javascript");
   });
 });

@@ -1,7 +1,7 @@
 const resolve = require("resolve");
 const fs = require("graceful-fs");
 const crypto = require("crypto");
-const { join, dirname, extname, resolve: pathResolve, posix: pathPosix } = require("path");
+const { join, dirname, extname, parse: pathParse, resolve: pathResolve, posix: pathPosix } = require("path");
 const { builtinModules } = require("module");
 const rspack = require("@rspack/core");
 const MemoryFS = require("memory-fs");
@@ -63,6 +63,21 @@ function ensureAssetBaseAssignment(code, assetName, esm, outputAssetBase = '') {
     return code.slice(0, runtimeIndex) + injection + code.slice(runtimeIndex);
   }
   return `${injection}${code}`;
+}
+
+function ensureModuleExceptionHandling(code) {
+  const requireRuntime =
+    /\/\/ The module cache\nvar __webpack_module_cache__ = \{\};\n\n\/\/ The require function\nfunction __webpack_require__\(moduleId\) \{[\s\S]*?\/\/ Return the exports of the module[\s\S]*?return module\.exports;/g;
+  return code.replace(requireRuntime, runtime => runtime
+    .replace(
+      /if \(cachedModule\.error !== undefined\) throw cachedModule\.error;/,
+      "// ncc retries failed CommonJS modules on the next require."
+    )
+    .replace(
+      /module\.error = e;\n(\s*)throw e;/,
+      "delete __webpack_module_cache__[moduleId];\n$1throw e;"
+    )
+  );
 }
 
 module.exports = ncc;
@@ -148,12 +163,20 @@ function ncc (
   let fullTsconfig = {};
   let resolveTsConfig;
   let tsconfigDirectory = dirname(resolvedEntry);
+  let configFileAbsolutePath;
   try {
-    const configFileAbsolutePath = walkParentDirs({
-      base: process.cwd(),
-      start: dirname(entry),
-      filename: 'tsconfig.json',
-    });
+    if (process.env.TS_NODE_PROJECT) {
+      const configuredPath = pathResolve(process.env.TS_NODE_PROJECT);
+      configFileAbsolutePath = fs.statSync(configuredPath).isDirectory()
+        ? join(configuredPath, "tsconfig.json")
+        : configuredPath;
+    } else {
+      configFileAbsolutePath = walkParentDirs({
+        base: pathParse(resolvedEntry).root,
+        start: dirname(resolvedEntry),
+        filename: 'tsconfig.json',
+      });
+    }
     fullTsconfig = loadTsconfig(configFileAbsolutePath) || {
       compilerOptions: {}
     };
@@ -526,6 +549,7 @@ function ncc (
             options: {
               transpileOnly,
               compiler: eval('__dirname + "/typescript.js"'),
+              configFilePath: configFileAbsolutePath,
               configFileDirectory: tsconfigDirectory,
               compilerOptions: {
                 module: 'esnext',
@@ -695,6 +719,7 @@ function ncc (
     let code = mfs.readFileSync(`/${filename}${ext === '.cjs' ? '.js' : ''}`, "utf8");
     let map = sourceMap ? JSON.parse(mfs.readFileSync(`/${filename}${ext === '.cjs' ? '.js' : ''}.map`, "utf8")) : null;
     code = ensureAssetBaseAssignment(code, filename, esm);
+    code = ensureModuleExceptionHandling(code);
 
     if (minify) {
       let result;
@@ -894,6 +919,9 @@ function walkParentDirs({
     }
 
     parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
   }
 
   return null;

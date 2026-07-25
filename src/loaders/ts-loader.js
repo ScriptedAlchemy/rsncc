@@ -63,6 +63,9 @@ function getTypeCheckState(loaderContext, typescript, parsedOptions) {
   }
   const state = {
     files: new Set(),
+    host: typescript.createCompilerHost(parsedOptions),
+    program: null,
+    emitDiagnostics: [],
     emitAsset: typeof compilation.emitAsset === "function"
       ? compilation.emitAsset.bind(compilation)
       : null,
@@ -74,9 +77,14 @@ function getTypeCheckState(loaderContext, typescript, parsedOptions) {
       return;
     }
     state.reported = true;
-    const host = typescript.createCompilerHost(parsedOptions);
-    const program = typescript.createProgram(Array.from(state.files), parsedOptions, host);
-    let diagnostics = typescript.getPreEmitDiagnostics(program);
+    const program = state.program || typescript.createProgram(
+      Array.from(state.files),
+      parsedOptions,
+      state.host
+    );
+    let diagnostics = state.emitDiagnostics.concat(
+      typescript.getPreEmitDiagnostics(program)
+    );
     if (
       state.emitAsset &&
       !parsedOptions.noEmit &&
@@ -120,6 +128,9 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
   if (this.cacheable) this.cacheable();
   const callback = this.async();
   const options = this.getOptions ? this.getOptions() : this.query || {};
+  if (options.configFilePath && this.addDependency) {
+    this.addDependency(options.configFilePath);
+  }
   const typescript = getCompiler(options);
   const compilerOptions = Object.assign({}, options.compilerOptions);
   if (compilerOptions.skipLibCheck === undefined) {
@@ -147,15 +158,42 @@ module.exports = function tsTranspileLoader(input, inputSourceMap) {
 
   if (typeCheckState) {
     typeCheckState.files.add(fileName);
+    if (
+      !typeCheckState.program ||
+      !typeCheckState.program.getSourceFile(fileName)
+    ) {
+      typeCheckState.program = typescript.createProgram(
+        Array.from(typeCheckState.files),
+        parsedOptions,
+        typeCheckState.host,
+        typeCheckState.program || undefined
+      );
+    }
+    const sourceFile = typeCheckState.program.getSourceFile(fileName);
+    const emitResult = typeCheckState.program.emit(
+      sourceFile,
+      (outputPath, content) => {
+        if (/\.d\.(?:ts|mts|cts)(?:\.map)?$/.test(outputPath)) {
+          return;
+        }
+        if (outputPath.endsWith(".map")) {
+          sourceMapText = content;
+        } else {
+          outputText = content;
+        }
+      }
+    );
+    typeCheckState.emitDiagnostics.push(...(emitResult.diagnostics || []));
+  } else {
+    const result = typescript.transpileModule(input.toString(), {
+      fileName,
+      compilerOptions: parsedOptions,
+      reportDiagnostics: true
+    });
+    outputText = result.outputText;
+    sourceMapText = result.sourceMapText;
+    diagnostics = diagnostics.concat(result.diagnostics || []);
   }
-  const result = typescript.transpileModule(input.toString(), {
-    fileName,
-    compilerOptions: parsedOptions,
-    reportDiagnostics: !typeCheckState
-  });
-  outputText = result.outputText;
-  sourceMapText = result.sourceMapText;
-  diagnostics = diagnostics.concat(result.diagnostics || []);
 
   if (!options.transpileOnly && !typeCheckState) {
     const host = typescript.createCompilerHost(parsedOptions);

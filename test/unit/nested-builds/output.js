@@ -130,7 +130,7 @@ function __nccwpck_require__(moduleId) {
 // Check if module is in cache
 var cachedModule = __webpack_module_cache__[moduleId];
 if (cachedModule !== undefined) {
-if (cachedModule.error !== undefined) throw cachedModule.error;
+// ncc retries failed CommonJS modules on the next require.
 return cachedModule.exports;
 }
 // Create a new module (and put it into the cache)
@@ -143,7 +143,7 @@ try {
 __webpack_modules__[moduleId](module, module.exports, __nccwpck_require__);
 
 } catch (e) {
-module.error = e;
+delete __webpack_module_cache__[moduleId];
 throw e;
 }
 // Return the exports of the module
