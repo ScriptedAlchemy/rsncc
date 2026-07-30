@@ -9,8 +9,17 @@ const runCmd = require("../src/cli");
 const formatCompilationErrors = require("../src/utils/format-compilation-errors");
 const isResolverNotFoundError = require("../src/utils/is-resolver-not-found-error");
 const missingDependencyPaths = require("../src/utils/missing-dependency-paths");
+const nodeModulesCandidates = require("../src/utils/node-modules-candidates");
 const relocateLoader = require("../src/loaders/relocate-loader");
 const tsLoader = require("../src/loaders/ts-loader");
+
+jest.setTimeout(20000);
+
+// A child that never exits would block the suite for the whole job timeout,
+// because execFileSync cannot be interrupted by the per-test timeout.
+function runNode(...args) {
+  return execFileSync(process.execPath, args, { encoding: "utf8", timeout: 15000 });
+}
 
 class StoreStream extends Writable {
   constructor() {
@@ -61,7 +70,10 @@ describe("review regressions", () => {
   let tmpDir;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ncc-review-"));
+    // The compilation records the resolver's real paths, while os.tmpdir() is a
+    // symlink on macOS (/var -> /private/var) and an 8.3 short name on Windows,
+    // so paths built from it directly would never match what was registered.
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ncc-review-")));
   });
 
   afterEach(() => {
@@ -143,7 +155,7 @@ describe("review regressions", () => {
     const { code } = await ncc(input, { cache: false, esm: true, quiet: true });
     const output = path.join(tmpDir, "output.mjs");
     fs.writeFileSync(output, code);
-    const result = execFileSync(process.execPath, [output], { encoding: "utf8" });
+    const result = runNode(output);
 
     expect(result.trim()).toBe("conditional-import-ok");
   });
@@ -172,7 +184,7 @@ describe("review regressions", () => {
       fs.mkdirSync(path.dirname(assetPath), { recursive: true });
       fs.writeFileSync(assetPath, asset.source);
     }
-    const result = execFileSync(process.execPath, [output], { encoding: "utf8" });
+    const result = runNode(output);
 
     expect(result.trim()).toBe("dynamic-import-ok");
   });
@@ -195,7 +207,7 @@ describe("review regressions", () => {
     const { code } = await ncc(input, { cache: false, quiet: true, transpileOnly: true });
     const output = path.join(tmpDir, "output.js");
     fs.writeFileSync(output, code);
-    const result = execFileSync(process.execPath, [output], { encoding: "utf8" });
+    const result = runNode(output);
 
     expect(result.trim()).toBe("require-ok");
   });
@@ -233,7 +245,7 @@ describe("review regressions", () => {
       `const value = require(${JSON.stringify(output)});`,
       "console.log('widget:' + ('Widget' in value));"
     ].join("\n"));
-    const result = execFileSync(process.execPath, [runner], { encoding: "utf8" });
+    const result = runNode(runner);
 
     expect(result.trim().split("\n")).toEqual(["2", "widget:false"]);
   });
@@ -268,8 +280,7 @@ describe("review regressions", () => {
       const output = path.join(tmpDir, "output.js");
       fs.writeFileSync(output, result.code);
 
-      expect(execFileSync(process.execPath, [output], { encoding: "utf8" }).trim())
-        .toBe("tsconfig-ok");
+      expect(runNode(output).trim()).toBe("tsconfig-ok");
       expect(watchedFiles).toBeDefined();
       expect([...watchedFiles]).toContain(tsconfig);
     } finally {
@@ -364,6 +375,35 @@ describe("review regressions", () => {
     expect(wildcardTargets).toContain(path.join(tmpDir, "short-prefix"));
     expect(wildcardTargets).toContain(path.join(tmpDir, "long-prefix"));
     expect(missingDependencyPaths("data:text/javascript,0", context, [".js"])).toEqual([]);
+  });
+
+  // "ncc run" links the nearest node_modules into its temporary output
+  // directory. Stopping that walk at resolve("/node_modules") hung on Windows
+  // whenever the input was on a different drive than the working directory,
+  // because resolve picks up the working directory's drive: walking up from the
+  // input reached the other drive's root and stayed there forever.
+  it("stops the node_modules walk at the root of a path on any platform", () => {
+    expect(nodeModulesCandidates("/tmp/ncc-review-abc", path.posix)).toEqual([
+      "/tmp/ncc-review-abc/node_modules",
+      "/tmp/node_modules"
+    ]);
+    expect(nodeModulesCandidates("/", path.posix)).toEqual([]);
+
+    expect(nodeModulesCandidates("C:\\Users\\runner\\AppData\\Local\\Temp\\x", path.win32)).toEqual([
+      "C:\\Users\\runner\\AppData\\Local\\Temp\\x\\node_modules",
+      "C:\\Users\\runner\\AppData\\Local\\Temp\\node_modules",
+      "C:\\Users\\runner\\AppData\\Local\\node_modules",
+      "C:\\Users\\runner\\AppData\\node_modules",
+      "C:\\Users\\runner\\node_modules",
+      "C:\\Users\\node_modules"
+    ]);
+    expect(nodeModulesCandidates("C:\\", path.win32)).toEqual([]);
+    expect(nodeModulesCandidates("\\\\server\\share\\project", path.win32)).toEqual([
+      "\\\\server\\share\\project\\node_modules"
+    ]);
+    expect(nodeModulesCandidates("\\\\server\\share", path.win32)).toEqual([]);
+
+    expect(nodeModulesCandidates(tmpDir)).toContain(path.join(tmpDir, "node_modules"));
   });
 
   it("registers missing dependencies with the watcher for a rewritten request", async () => {
