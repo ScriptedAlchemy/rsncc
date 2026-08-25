@@ -17,8 +17,8 @@ importers:
         specifier: ^1.7.11
         version: 1.7.11
       '@vercel/webpack-asset-relocator-loader':
-        specifier: ^1.10.0
-        version: 1.10.0(encoding@0.1.13)
+        specifier: 1.10.3
+        version: 1.10.3(encoding@0.1.13)
     devDependencies:
       '@aws-sdk/client-s3':
         specifier: ^3.787.0
@@ -1619,8 +1619,8 @@ packages:
     resolution: {integrity: sha512-yURCknZhvywvQItHMMmFSo+fq5arCUIyz/CVk7jD89MSai7dkaX8ufjCWp3NttLojoTVbcE72ri+be/TnEbMHw==}
     engines: {node: '>=20.0.0'}
 
-  '@vercel/webpack-asset-relocator-loader@1.10.0':
-    resolution: {integrity: sha512-CCDqnX5Jt1hmwvUhpkKm4y8oK9Z4HyEtNPthxTp37WOllawyuAxDuNCAr2X6SmwOlFpcudNzIBvuDQ29MVQuCQ==}
+  '@vercel/webpack-asset-relocator-loader@1.10.3':
+    resolution: {integrity: sha512-G8jCqUKGsgvzHA1R9SAh2pzMT/Cea5BKmx1C3ng18ykLWj58o9PXWt9Fj8fO4b5GRwezR1Btib1DbQ6pByxb5g==}
 
   '@vue/compiler-sfc@2.7.16':
     resolution: {integrity: sha512-KWhJ9k5nXuNtygPU7+t1rX6baZeqOYLEforUPjgNDBnLicfHCoi48H87Q8XyLZOrNNsmhuwKqtpDQWjEFe6Ekg==}
@@ -9890,7 +9890,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@vercel/webpack-asset-relocator-loader@1.10.0(encoding@0.1.13)':
+  '@vercel/webpack-asset-relocator-loader@1.10.3(encoding@0.1.13)':
     dependencies:
       '@mapbox/node-pre-gyp': 2.0.3(encoding@0.1.13)
       acorn: 8.16.0
